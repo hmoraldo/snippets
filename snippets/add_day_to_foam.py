@@ -26,32 +26,49 @@ flags.DEFINE_string('template_path', None, 'Template path.')
 FLAGS = flags.FLAGS
 
 
-def main(_):
-  last_path = sorted(glob.glob(os.path.join(FLAGS.foam_path, '????-??-??.md')))[-1]
-  last_day = os.path.basename(os.path.splitext(last_path)[0])
-  print(f'last day: {last_day}')
+def path_to_date(path):
+  return os.path.basename(os.path.splitext(path)[0])
 
+
+def main(_):
   today = datetime.date.today().strftime('%Y-%m-%d')
   today_path = os.path.join(FLAGS.foam_path, f'{today}.md')
   today_meetings_path = os.path.join(FLAGS.foam_path, f'meetings-{today}.md')
+
+  # Find last_day, usually yesterday.
+  last_paths = sorted(glob.glob(os.path.join(FLAGS.foam_path, '????-??-??.md')))
+  last_paths = [p for p in last_paths if path_to_date(p) <= today]
+  last_path = last_paths[-1]
+  last_day = path_to_date(last_path)
+  print(f'last day: {last_day}')
 
   if os.path.exists(today_path):
     print(f'File for {today} already exists, quitting.')
     return
 
   with open(last_path, 'r') as f:
+    # Lines marked with this tag aren't sent to next day, even if they contain
+    # SEND_NEXT_STR or KEEP_NEXT_STR strings.
+    AUTO_REMOVE_STR = 'AUTO_REMOVE'
+    # Lines marked with this tag are sent to the next day.
     SEND_NEXT_STR = 'SEND_TO_NEXT_DAY'
-    lines_to_add = [l.replace(SEND_NEXT_STR, '') for l in f.readlines() if SEND_NEXT_STR in l]
+    # Lines marked with this tag are sent to all next days, not just the next one.
+    KEEP_NEXT_STR = 'KEEP_ALL_NEXT_DAYS'
+
+    raw_lines = f.readlines()
+    lines_to_add = [l.replace(SEND_NEXT_STR, '') for l in raw_lines if SEND_NEXT_STR in l]
+    lines_to_add += [l for l in raw_lines if KEEP_NEXT_STR in l]
+    lines_to_add = [l.rstrip() for l in lines_to_add if AUTO_REMOVE_STR not in l]
 
   with open(FLAGS.template_path, 'r') as f:
     template = f.read()
 
   with open(today_meetings_path, 'w') as f:
-    f.write(f'# meetings-{today}\n\nbacklinks\n\n')
+    f.write(f'# meetings-{today}\n\nlast meeting notes: [[meetings-{last_day}]]\n\nbacklinks\n\n')
 
   with open(today_path, 'w') as f:
     contents = template.replace('{TODAY}', today).replace('{LAST_DAY}', last_day)
-    contents += ' '.join(lines_to_add)
+    contents += '\n'.join(lines_to_add) + '\n'
     f.write(contents)
 
   print(f'Preserving lines: {lines_to_add}')
@@ -62,4 +79,3 @@ if __name__ == '__main__':
   flags.mark_flag_as_required('foam_path')
   flags.mark_flag_as_required('template_path')
   app.run(main)
-
