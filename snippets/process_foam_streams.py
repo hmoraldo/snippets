@@ -17,91 +17,82 @@
 from absl import app
 from absl import flags
 
-import datetime
-import glob
+import json
 import os.path
 import re
 
 flags.DEFINE_string('foam_path', None, 'Foam path.')
+flags.DEFINE_string('stream_data_path', None, 'Where to write stream data to.')
 
 FLAGS = flags.FLAGS
 
 
 UPLOAD_TAG = 'UPLOAD_TO_DASHBOARD'
+OBSOLETE_TAG = 'OBSOLETE_STREAM'
 
 
-def is_tag_present(tag, s):
-  return (f'[[{UPLOAD_TAG}]]' in s) or (f'#{UPLOAD_TAG}' in s) or f'#[[{UPLOAD_TAG}]]' in s
+def expand_project_tags(tag):
+  tags = set([tag])
+  if tag.startswith('proj--'):
+    parts = tag.split('--')
+    for i in range(1, len(parts) - 1):
+      tags.add('--'.join(parts[:i+1]))
+  return sorted(list(tags), key=len, reverse=True)
+
+
+def find_all_tags(s):
+  # Finds all tags and expands them as needed.
+  m = re.findall(r'\[\[(.+?)\]\]|#([a-zA-Z0-9\-_]+?)\b', s)
+  tags = []
+  for g in m:
+    g = [e for e in g if e]
+    if len(g) != 1:
+      raise ValueError(f'Invalid match: {g} for {s=}')
+    tags += expand_project_tags(g[0])
+  return tags
 
 
 def remove_tag(tag, s):
-  return s.replace(f'#[[{UPLOAD_TAG}]]', '').replace(f'[[{UPLOAD_TAG}]]', '').replace(f'#{UPLOAD_TAG}', '')
+  s = s.replace(f'#[[{tag}]]', '').replace(f'[[{tag}]]', '')
+  return re.sub(fr'#{tag}\b', '', s)
 
 
 def main(_):
-  # Create generated file.
   with open(os.path.join(FLAGS.foam_path, 'all-streams.md'), 'r') as f:
     raw_lines = f.readlines()
 
-  active_streams = [remove_tag(UPLOAD_TAG, l) for l in raw_lines if is_tag_present(UPLOAD_TAG, l)]
+  projects = set()
+  streams = []
+  for raw_line in raw_lines:
+    tags = find_all_tags(raw_line)
+    for t in tags:
+      if t.startswith('proj--'):
+        projects.add(t)
 
-  streams_one_date = []
-  streams_more_dates = []
-  for stream in active_streams:
-    dates = re.findall('\[\[(\d\d\d\d-\d\d-\d\d)\]\]', stream)
+    if (UPLOAD_TAG not in tags) and (OBSOLETE_TAG not in tags):
+      continue
+    stream = remove_tag(OBSOLETE_TAG, remove_tag(UPLOAD_TAG, raw_line))
+
+    dates = [t for t in tags if re.fullmatch(r'\d\d\d\d-\d\d-\d\d', t)]
     if not dates:
       raise ValueError(f'Stream with no dates: {stream}')
 
-    d = {'raw_text': stream,
-         # in python 3.9 start using removeprefix instead
-         'text': re.sub('^\*', '', stream.strip()).strip(),
-         'dates': dates,
-         'last_date': sorted(dates)[-1]}
-    if len(dates) == 1:
-      streams_one_date.append(d)
-    elif len(dates) > 1:
-      streams_more_dates.append(d)
+    streams.append({
+      'raw_text': stream,
+      # in python 3.9 start using removeprefix instead
+      'text': re.sub(r'^\*', '', stream.strip()).strip(),
+      'dates': dates,
+      'last_date': sorted(dates)[-1],
+      'tags': tags,
+      'obsolete': (OBSOLETE_TAG in tags)})
 
-  GENERATED_FILE_NAME = 'all-streams-generated'
-  WARNING_STRING = '**THIS FILE IS AUTO GENERATED - DO NOT EDIT** - Edit streams in [[all-streams]] instead.\n\n'
-  last_date_key = lambda d: d['last_date']
-
-  with open(os.path.join(FLAGS.foam_path, f'{GENERATED_FILE_NAME}.md'), 'w') as f:
-    f.write(f'# {GENERATED_FILE_NAME}\n\n')
-    f.write(WARNING_STRING)
-    f.write('Streams with double dates:\n\n')
-    for stream in sorted(streams_more_dates, key=last_date_key):
-      f.write(f'* {stream["last_date"]}: {stream["text"]}\n')
-    f.write('\n')
-    f.write(WARNING_STRING)
-    f.write('Streams with single dates:\n\n')
-    for stream in sorted(streams_one_date, key=last_date_key):
-      f.write(f'* {stream["last_date"]}: {stream["text"]}\n')
-
-    f.write('\n')
-    f.write(WARNING_STRING)
-
-  # Create quick links page.
-  QUICK_LINKS_FILE_NAME = '000-quick-links'
-  QUICK_LINKS_WARNING = '**THIS FILE IS AUTO GENERATED - DO NOT EDIT**\n'
-  with open(os.path.join(FLAGS.foam_path, f'{QUICK_LINKS_FILE_NAME}.md'), 'w') as f:
-    today = datetime.date.today().strftime('%Y-%m-%d')
-
-    f.write(f'# {QUICK_LINKS_FILE_NAME}\n\n')
-    f.write(QUICK_LINKS_WARNING)
-    f.write('\n')
-    f.write(f'* today: [[{today}]]\n')
-    f.write(f'* today meetings: [[meetings-{today}]]\n')
-    f.write(f'* future meetings: [[future-meetings]]\n')
-    f.write(f'* all-streams (editable): [[all-streams]]\n')
-    f.write(f'* all-streams-generated: [[all-streams-generated]]\n')
-    f.write(f'* startup page: [[000-startup]]\n')
-    f.write('\n')
-    f.write(QUICK_LINKS_WARNING)
-
-  print('Done.')
+  with open(FLAGS.stream_data_path, 'w') as f:
+    f.write(json.dumps(
+      {'projects': list(projects), 'streams': streams}))
+  print(f'Finished writing to {FLAGS.stream_data_path}')
 
 
 if __name__ == '__main__':
   flags.mark_flag_as_required('foam_path')
+  flags.mark_flag_as_required('stream_data_path')
   app.run(main)
